@@ -23,6 +23,8 @@ const MAX_ALLOCATION_ATTEMPTS = 3;
 
 class TableReservationConflict extends Error {}
 
+class QueueCancellationConflict extends Error {}
+
 interface AssignedTable {
   tableId: Types.ObjectId;
   code: string;
@@ -81,6 +83,20 @@ export interface QueueProcessingResponse {
       status: TableStatus.PARTIAL | TableStatus.OCCUPIED;
     }>;
   }>;
+}
+
+export interface QueueCancellationResponse {
+  partyId: string;
+  queueNumber: number;
+  originalHeadcount: number;
+  cancelledNow: number;
+  cancelledCount: number;
+  seatedCount: number;
+  queuedCount: 0;
+  departedCount: number;
+  status: PartyStatus.SEATED | PartyStatus.COMPLETED;
+  completedAt: Date | null;
+  queueReprocessed: false;
 }
 
 @Injectable()
@@ -204,6 +220,123 @@ export class AllocationService {
     }
 
     throw new ConflictException('Unable to process the queue; please retry');
+  }
+
+  async cancelQueuedParty(
+    partyId: string,
+  ): Promise<QueueCancellationResponse> {
+    if (!Types.ObjectId.isValid(partyId)) {
+      throw new NotFoundException(`Party ${partyId} was not found`);
+    }
+
+    for (let attempt = 1; attempt <= MAX_ALLOCATION_ATTEMPTS; attempt += 1) {
+      const session = await this.connection.startSession();
+
+      try {
+        let response: QueueCancellationResponse | undefined;
+
+        await session.withTransaction(async () => {
+          const party = await this.partyModel
+            .findById(new Types.ObjectId(partyId))
+            .session(session)
+            .lean();
+
+          if (party === null) {
+            throw new NotFoundException(`Party ${partyId} was not found`);
+          }
+
+          if (
+            party.queuedCount <= 0 ||
+            party.queueNumber === null ||
+            ![PartyStatus.QUEUED, PartyStatus.PARTIALLY_SEATED].includes(
+              party.status,
+            )
+          ) {
+            throw new ConflictException(
+              `Party ${partyId} has no active queued guests`,
+            );
+          }
+
+          const cancelledAt = new Date();
+          const cancelledNow = party.queuedCount;
+          const cancelledCount = (party.cancelledCount ?? 0) + cancelledNow;
+          const status =
+            party.seatedCount > 0
+              ? PartyStatus.SEATED
+              : PartyStatus.COMPLETED;
+          const completedAt =
+            status === PartyStatus.COMPLETED ? cancelledAt : null;
+          const updatedParty = await this.partyModel.findOneAndUpdate(
+            {
+              _id: party._id,
+              queueNumber: party.queueNumber,
+              queuedCount: party.queuedCount,
+              seatedCount: party.seatedCount,
+              departedCount: party.departedCount,
+              status: party.status,
+            },
+            {
+              $inc: { cancelledCount: cancelledNow },
+              $set: {
+                queuedCount: 0,
+                status,
+                completedAt,
+              },
+            },
+            {
+              returnDocument: 'after',
+              runValidators: true,
+              session,
+            },
+          );
+
+          if (updatedParty === null) {
+            throw new QueueCancellationConflict();
+          }
+
+          response = {
+            partyId: party._id.toString(),
+            queueNumber: party.queueNumber,
+            originalHeadcount: party.originalHeadcount,
+            cancelledNow,
+            cancelledCount,
+            seatedCount: party.seatedCount,
+            queuedCount: 0,
+            departedCount: party.departedCount,
+            status,
+            completedAt,
+            queueReprocessed: false,
+          };
+        });
+
+        if (response === undefined) {
+          throw new Error(
+            'Queue-cancellation transaction completed without a response',
+          );
+        }
+
+        return response;
+      } catch (error) {
+        if (
+          error instanceof QueueCancellationConflict &&
+          attempt < MAX_ALLOCATION_ATTEMPTS
+        ) {
+          continue;
+        }
+
+        if (error instanceof QueueCancellationConflict) {
+          throw new ConflictException(
+            'Party queue state changed during cancellation; please retry',
+          );
+        }
+
+        throw error;
+      } finally {
+        await session.endSession();
+      }
+    }
+
+    throw new ConflictException('Unable to cancel queued guests; please retry');
   }
 
   async releaseTable(code: string): Promise<TableReleaseResponse> {
@@ -415,6 +548,7 @@ export class AllocationService {
           seatedCount: selection.seatedCount,
           queuedCount: selection.unseatedCount,
           departedCount: 0,
+          cancelledCount: 0,
           status,
           queueNumber,
           assignments: assignedTables.map((assignment) => ({

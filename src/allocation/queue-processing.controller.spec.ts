@@ -19,4 +19,28 @@ describe('QueueProcessingController', () => {
     });
     expect(allocationService.processQueue).toHaveBeenCalledOnce();
   });
+
+  it('delegates queued-party cancellation by party ID', async () => {
+    const allocationService = {
+      cancelQueuedParty: vi.fn().mockResolvedValue({
+        partyId: '68b700000000000000000001',
+        cancelledNow: 3,
+        queuedCount: 0,
+      }),
+    };
+    const controller = new QueueProcessingController(
+      allocationService as unknown as AllocationService,
+    );
+
+    await expect(
+      controller.cancel({ partyId: '68b700000000000000000001' }),
+    ).resolves.toEqual({
+      partyId: '68b700000000000000000001',
+      cancelledNow: 3,
+      queuedCount: 0,
+    });
+    expect(allocationService.cancelQueuedParty).toHaveBeenCalledWith(
+      '68b700000000000000000001',
+    );
+  });
 });

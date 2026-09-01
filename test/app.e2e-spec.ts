@@ -174,6 +174,263 @@ describe('Table allocation API (e2e)', () => {
       });
   });
 
+  it('cancels a fully queued party so a newer party can use free capacity', async () => {
+    await configureRestaurant(1, 4);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 4 })
+      .expect(201);
+    const queuedParty = await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 3 })
+      .expect(201);
+    await request(app.getHttpServer())
+      .patch('/api/v1/owner/tables/T1/release')
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${queuedParty.body.partyId}/cancel`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          partyId: queuedParty.body.partyId,
+          queueNumber: 100,
+          originalHeadcount: 3,
+          cancelledNow: 3,
+          cancelledCount: 3,
+          seatedCount: 0,
+          queuedCount: 0,
+          departedCount: 0,
+          status: 'completed',
+          queueReprocessed: false,
+        });
+        expect(body.completedAt).toEqual(expect.any(String));
+      });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/customer/queue')
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toEqual({ count: 0, entries: [] });
+      });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 2 })
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          status: 'seated',
+          seatedCount: 2,
+          queuedCount: 0,
+          tables: [{ code: 'T1', seatedCount: 2, status: 'partial' }],
+        });
+      });
+
+    const persistedParty = await connection
+      .collection('parties')
+      .findOne({ _id: new Types.ObjectId(queuedParty.body.partyId) });
+
+    expect(persistedParty).toMatchObject({
+      originalHeadcount: 3,
+      seatedCount: 0,
+      queuedCount: 0,
+      departedCount: 0,
+      cancelledCount: 3,
+      status: 'completed',
+      queueNumber: 100,
+      assignments: [],
+    });
+    expect(
+      persistedParty!.seatedCount +
+        persistedParty!.queuedCount +
+        persistedParty!.departedCount +
+        persistedParty!.cancelledCount,
+    ).toBe(persistedParty!.originalHeadcount);
+  });
+
+  it('cancels only a partially seated party remainder and preserves its table history', async () => {
+    await configureRestaurant(2, 4);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 4 })
+      .expect(201);
+    const partialParty = await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 6 })
+      .expect(201);
+
+    expect(partialParty.body).toMatchObject({
+      status: 'partially_seated',
+      seatedCount: 4,
+      queuedCount: 2,
+      tables: [{ code: 'T2', seatedCount: 4 }],
+    });
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${partialParty.body.partyId}/cancel`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({
+          originalHeadcount: 6,
+          cancelledNow: 2,
+          cancelledCount: 2,
+          seatedCount: 4,
+          queuedCount: 0,
+          departedCount: 0,
+          status: 'seated',
+          completedAt: null,
+        });
+      });
+
+    const persistedParty = await connection
+      .collection('parties')
+      .findOne({ _id: new Types.ObjectId(partialParty.body.partyId) });
+    const assignedTable = await connection
+      .collection('tables')
+      .findOne({ code: 'T2' });
+
+    expect(persistedParty).toMatchObject({
+      originalHeadcount: 6,
+      seatedCount: 4,
+      queuedCount: 0,
+      departedCount: 0,
+      cancelledCount: 2,
+      status: 'seated',
+      queueNumber: 100,
+    });
+    expect(persistedParty?.assignments).toHaveLength(1);
+    expect(persistedParty?.assignments[0]).toMatchObject({
+      tableId: assignedTable?._id,
+      seatedCount: 4,
+      releasedAt: null,
+    });
+    expect(assignedTable).toMatchObject({
+      code: 'T2',
+      status: 'occupied',
+      occupiedSeats: 4,
+      partyId: persistedParty?._id,
+    });
+    expect(
+      persistedParty!.seatedCount +
+        persistedParty!.queuedCount +
+        persistedParty!.departedCount +
+        persistedParty!.cancelledCount,
+    ).toBe(persistedParty!.originalHeadcount);
+  });
+
+  it('handles cancellation errors and permits reconfiguration once state is clear', async () => {
+    await configureRestaurant(1, 4);
+
+    const seatedParty = await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 4 })
+      .expect(201);
+    const queuedParty = await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 2 })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${new Types.ObjectId().toString()}/cancel`)
+      .expect(404);
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${seatedParty.body.partyId}/cancel`)
+      .expect(409);
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${queuedParty.body.partyId}/cancel`)
+      .expect(200);
+    await request(app.getHttpServer())
+      .patch(`/api/v1/owner/queue/${queuedParty.body.partyId}/cancel`)
+      .expect(409);
+    await request(app.getHttpServer())
+      .patch('/api/v1/owner/tables/T1/release')
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .put('/api/v1/owner/restaurant/configuration')
+      .send({ tableCount: 2, chairsPerTable: 2 })
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.configuration).toEqual({
+          tableCount: 2,
+          chairsPerTable: 2,
+          totalCapacity: 4,
+        });
+      });
+  });
+
+  it('serializes cancellation against concurrent queue processing', async () => {
+    await configureRestaurant(1, 4);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 4 })
+      .expect(201);
+    const queuedParty = await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount: 4 })
+      .expect(201);
+    await request(app.getHttpServer())
+      .patch('/api/v1/owner/tables/T1/release')
+      .expect(200);
+
+    const [cancellationResponse, processingResponse] = await Promise.all([
+      request(app.getHttpServer()).patch(
+        `/api/v1/owner/queue/${queuedParty.body.partyId}/cancel`,
+      ),
+      request(app.getHttpServer()).post('/api/v1/owner/queue/process'),
+    ]);
+
+    expect([200, 409]).toContain(cancellationResponse.status);
+    expect(processingResponse.status).toBe(200);
+
+    const persistedParty = await connection
+      .collection('parties')
+      .findOne({ _id: new Types.ObjectId(queuedParty.body.partyId) });
+    const persistedTable = await connection
+      .collection('tables')
+      .findOne({ code: 'T1' });
+
+    expect(persistedParty?.queuedCount).toBe(0);
+    expect(
+      persistedParty!.seatedCount +
+        persistedParty!.queuedCount +
+        persistedParty!.departedCount +
+        persistedParty!.cancelledCount,
+    ).toBe(persistedParty!.originalHeadcount);
+
+    if (cancellationResponse.status === 200) {
+      expect(processingResponse.body.outcome).toBe('queue_empty');
+      expect(persistedParty).toMatchObject({
+        seatedCount: 0,
+        cancelledCount: 4,
+        status: 'completed',
+        assignments: [],
+      });
+      expect(persistedTable).toMatchObject({
+        status: 'free',
+        occupiedSeats: 0,
+        partyId: null,
+      });
+    } else {
+      expect(processingResponse.body.outcome).toBe('processed');
+      expect(persistedParty).toMatchObject({
+        seatedCount: 4,
+        cancelledCount: 0,
+        status: 'seated',
+      });
+      expect(persistedParty?.assignments).toHaveLength(1);
+      expect(persistedTable).toMatchObject({
+        status: 'occupied',
+        occupiedSeats: 4,
+        partyId: persistedParty?._id,
+      });
+    }
+  });
+
   it('does not double-book a table under concurrent requests', async () => {
     await configureRestaurant(1, 4);
 

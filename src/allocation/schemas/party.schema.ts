@@ -80,6 +80,13 @@ export class Party {
   departedCount: number;
 
   @Prop({
+    required: true,
+    min: 0,
+    default: 0,
+  })
+  cancelledCount: number;
+
+  @Prop({
     type: String,
     required: true,
     enum: PartyStatus,

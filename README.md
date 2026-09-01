@@ -101,6 +101,27 @@ curl http://localhost:3000/api/v1/customer/queue
 Queue numbers are permanent and monotonically increasing. Positions are computed
 from the currently active queue.
 
+### Cancel queued guests
+
+An owner or staff member can cancel the remaining queued portion of a party by
+its stable party ID:
+
+```bash
+curl -X PATCH \
+  http://localhost:3000/api/v1/owner/queue/68b700000000000000000001/cancel
+```
+
+For a fully queued party, all waiting guests are recorded as cancelled and the
+party becomes `completed`. For a partially seated party, only the queued
+remainder is cancelled; its occupied tables and assignment history are unchanged,
+and the party becomes `seated`. The original queue number is retained for audit
+history.
+
+Cancellation does not automatically process the next party. It returns `404 Not
+Found` for an unknown party and `409 Conflict` when the party has no active queued
+guests. Repeating a successful cancellation therefore returns `409`; the endpoint
+is intentionally non-idempotent.
+
 ### Process the queue
 
 Queue processing is an explicit staff action:
@@ -185,6 +206,13 @@ Releasing a table does **not** automatically process the queue. It makes the tab
 available for the separate `POST /api/v1/owner/queue/process` staff action and is
 reported as `queueReprocessed: false` by the release endpoint.
 
+Queue cancellation also does not process the next entry. Party counts preserve
+the following invariant across allocation, cancellation, processing, and release:
+
+```text
+originalHeadcount = seatedCount + queuedCount + departedCount + cancelledCount
+```
+
 For a party using multiple tables, releasing one table records the guests at that
 table as departed. A fully served party becomes `completed` after its final table
 is released. A party with unseated guests remains in the queue.
@@ -223,12 +251,18 @@ guests twice. A normal allocation racing with processing either observes the
 active queue and joins it or observes the post-processing table state; it cannot
 take a table from an older active entry.
 
+Queue cancellation runs in a transaction and conditionally matches the party's
+observed queue number, queued/seated/departed counts, and status. Cancellation and
+queue processing therefore cannot both consume the same queued guests. The losing
+operation retries from current state and either completes normally or reports that
+the party no longer has active queued guests.
+
 ## MongoDB model
 
 - `restaurantconfigs`: singleton operator configuration.
 - `tables`: capacity, status, occupied seats, and current party reference.
-- `parties`: original/seated/queued/departed counts plus embedded assignment
-  history.
+- `parties`: original/seated/queued/departed/cancelled counts plus embedded
+  assignment history.
 - `counters`: atomic queue-number sequence.
 
 Assignment history is embedded because it belongs to one party and is read and
@@ -252,17 +286,20 @@ collections between tests and drops only that test database when finished.
 The tests cover allocation objective ordering, exact and partial fits, validation,
 queue numbering, table release, FIFO queue processing, repeated partial
 processing, assignment-history preservation, bypass prevention, persistence,
-simultaneous allocations, and simultaneous queue processors competing for one
-table.
+queue cancellation, count invariants, simultaneous allocations, simultaneous
+queue processors competing for one table, and cancellation racing with queue
+processing.
 
 ## Status codes
 
-- `200 OK`: reads, configuration, table release, and queue processing.
+- `200 OK`: reads, configuration, table release, queue processing, and queue
+  cancellation.
 - `201 Created`: a party allocation was persisted.
 - `400 Bad Request`: malformed input or physically impossible headcount.
 - `404 Not Found`: requested table does not exist.
 - `409 Conflict`: unsafe reconfiguration, already-free table, missing restaurant
-  configuration, or repeated allocation/queue-processing contention.
+  configuration, no active queued guests to cancel, or repeated
+  allocation/queue-processing/cancellation contention.
 
 Authentication is intentionally omitted because it is outside the challenge
 scope.

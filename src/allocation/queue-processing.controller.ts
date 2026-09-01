@@ -1,12 +1,25 @@
-import { Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Controller,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+} from '@nestjs/common';
 import {
   ApiConflictResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
 
 import { AllocationService } from './allocation.service.js';
+import {
+  CancelQueuedPartyParamsDto,
+  CancelQueuedPartyResponseDto,
+} from './dto/cancel-queued-party.dto.js';
 
 @ApiTags('Owner')
 @Controller('owner/queue')
@@ -55,5 +68,29 @@ export class QueueProcessingController {
   })
   process() {
     return this.allocationService.processQueue();
+  }
+
+  @Patch(':partyId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cancel the remaining queued guests for a party',
+    description:
+      'Preserves the party, queue number, occupied tables, and assignment history. The next queued party is not processed automatically.',
+  })
+  @ApiParam({
+    name: 'partyId',
+    example: '68b700000000000000000001',
+    description: 'Stable party identifier',
+  })
+  @ApiOkResponse({
+    description: 'The remaining queued guests were cancelled',
+    type: CancelQueuedPartyResponseDto,
+  })
+  @ApiNotFoundResponse({ description: 'Party does not exist' })
+  @ApiConflictResponse({
+    description: 'Party has no active queued guests or remained contended',
+  })
+  cancel(@Param() params: CancelQueuedPartyParamsDto) {
+    return this.allocationService.cancelQueuedParty(params.partyId);
   }
 }

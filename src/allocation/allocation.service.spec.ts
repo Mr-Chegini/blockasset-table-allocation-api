@@ -539,6 +539,167 @@ describe('AllocationService', () => {
     });
   });
 
+  describe('cancelQueuedParty', () => {
+    it('cancels a fully queued party and completes it', async () => {
+      const partyId = new Types.ObjectId();
+      const party = {
+        _id: partyId,
+        originalHeadcount: 3,
+        seatedCount: 0,
+        queuedCount: 3,
+        departedCount: 0,
+        cancelledCount: 0,
+        queueNumber: 100,
+        status: PartyStatus.QUEUED,
+        assignments: [],
+      };
+      partyModel.findById.mockReturnValue(queryResult(party));
+
+      const result = await service.cancelQueuedParty(partyId.toString());
+
+      expect(result).toMatchObject({
+        partyId: partyId.toString(),
+        queueNumber: 100,
+        originalHeadcount: 3,
+        cancelledNow: 3,
+        cancelledCount: 3,
+        seatedCount: 0,
+        queuedCount: 0,
+        departedCount: 0,
+        status: PartyStatus.COMPLETED,
+        queueReprocessed: false,
+      });
+      expect(result.completedAt).toBeInstanceOf(Date);
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
+        {
+          _id: partyId,
+          queueNumber: 100,
+          queuedCount: 3,
+          seatedCount: 0,
+          departedCount: 0,
+          status: PartyStatus.QUEUED,
+        },
+        {
+          $inc: { cancelledCount: 3 },
+          $set: {
+            queuedCount: 0,
+            status: PartyStatus.COMPLETED,
+            completedAt: expect.any(Date),
+          },
+        },
+        {
+          returnDocument: 'after',
+          runValidators: true,
+          session: sessions[0],
+        },
+      );
+    });
+
+    it('cancels only the queued remainder of a partially seated party', async () => {
+      const partyId = new Types.ObjectId();
+      const assignment = {
+        tableId: new Types.ObjectId(),
+        seatedCount: 4,
+        assignedAt: new Date(),
+        releasedAt: null,
+      };
+      partyModel.findById.mockReturnValue(
+        queryResult({
+          _id: partyId,
+          originalHeadcount: 6,
+          seatedCount: 4,
+          queuedCount: 2,
+          departedCount: 0,
+          cancelledCount: 0,
+          queueNumber: 100,
+          status: PartyStatus.PARTIALLY_SEATED,
+          assignments: [assignment],
+        }),
+      );
+
+      await expect(
+        service.cancelQueuedParty(partyId.toString()),
+      ).resolves.toMatchObject({
+        cancelledNow: 2,
+        cancelledCount: 2,
+        seatedCount: 4,
+        queuedCount: 0,
+        status: PartyStatus.SEATED,
+        completedAt: null,
+      });
+      expect(tableModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(tableModel.bulkWrite).not.toHaveBeenCalled();
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: partyId, queuedCount: 2 }),
+        {
+          $inc: { cancelledCount: 2 },
+          $set: {
+            queuedCount: 0,
+            status: PartyStatus.SEATED,
+            completedAt: null,
+          },
+        },
+        expect.objectContaining({ session: sessions[0] }),
+      );
+    });
+
+    it('returns not found for an unknown party', async () => {
+      const partyId = new Types.ObjectId();
+      partyModel.findById.mockReturnValue(queryResult(null));
+
+      await expect(
+        service.cancelQueuedParty(partyId.toString()),
+      ).rejects.toThrow(`Party ${partyId.toString()} was not found`);
+      expect(partyModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('returns a conflict when the party has no active queued guests', async () => {
+      const partyId = new Types.ObjectId();
+      partyModel.findById.mockReturnValue(
+        queryResult({
+          _id: partyId,
+          originalHeadcount: 4,
+          seatedCount: 4,
+          queuedCount: 0,
+          departedCount: 0,
+          cancelledCount: 0,
+          queueNumber: null,
+          status: PartyStatus.SEATED,
+        }),
+      );
+
+      await expect(
+        service.cancelQueuedParty(partyId.toString()),
+      ).rejects.toThrow(`Party ${partyId.toString()} has no active queued guests`);
+      expect(partyModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('retries when the observed queue state changes before cancellation', async () => {
+      const partyId = new Types.ObjectId();
+      partyModel.findById.mockReturnValue(
+        queryResult({
+          _id: partyId,
+          originalHeadcount: 2,
+          seatedCount: 0,
+          queuedCount: 2,
+          departedCount: 0,
+          cancelledCount: 0,
+          queueNumber: 100,
+          status: PartyStatus.QUEUED,
+        }),
+      );
+      partyModel.findOneAndUpdate
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({});
+
+      await expect(
+        service.cancelQueuedParty(partyId.toString()),
+      ).resolves.toMatchObject({ cancelledNow: 2, cancelledCount: 2 });
+      expect(connection.startSession).toHaveBeenCalledTimes(2);
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('releaseTable', () => {
     it('frees the table and completes a party after its final release', async () => {
       const partyId = new Types.ObjectId();
