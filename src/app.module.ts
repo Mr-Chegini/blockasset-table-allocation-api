@@ -5,6 +5,7 @@ import Joi from 'joi';
 
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
+import { RestaurantModule } from './restaurant/restaurant.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { AppService } from './app.service.js';
         uri: configService.getOrThrow<string>('MONGODB_URI'),
       }),
     }),
+    RestaurantModule,
   ],
   controllers: [AppController],
   providers: [AppService],
