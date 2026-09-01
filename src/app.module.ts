@@ -5,6 +5,7 @@ import Joi from 'joi';
 
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
+import { AllocationModule } from './allocation/allocation.module.js';
 import { RestaurantModule } from './restaurant/restaurant.module.js';
 
 @Module({
@@ -27,6 +28,7 @@ import { RestaurantModule } from './restaurant/restaurant.module.js';
       }),
     }),
     RestaurantModule,
+    AllocationModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,0 +1,234 @@
+import { BadRequestException, ConflictException } from '@nestjs/common';
+import { Connection, Model, Types } from 'mongoose';
+
+import { RestaurantConfig } from '../restaurant/schemas/restaurant-config.schema.js';
+import { Table, TableStatus } from '../restaurant/schemas/table.schema.js';
+import { AllocationService } from './allocation.service.js';
+import { Counter } from './schemas/counter.schema.js';
+import { Party, PartyStatus } from './schemas/party.schema.js';
+
+function queryResult<T>(value: T) {
+  const lean = vi.fn().mockResolvedValue(value);
+  const session = vi.fn().mockReturnValue({ lean });
+
+  return { session, lean };
+}
+
+function freeTable(tableNumber: number, capacity = 4) {
+  return {
+    _id: new Types.ObjectId(),
+    code: `T${tableNumber}`,
+    tableNumber,
+    capacity,
+    status: TableStatus.FREE,
+    partyId: null,
+    occupiedSeats: 0,
+  };
+}
+
+describe('AllocationService', () => {
+  const restaurantConfigModel = { findOne: vi.fn() };
+  const tableModel = { find: vi.fn(), bulkWrite: vi.fn() };
+  const partyModel = { create: vi.fn() };
+  const counterModel = { findOneAndUpdate: vi.fn() };
+  const connection = { startSession: vi.fn() };
+
+  let sessions: Array<{
+    withTransaction: ReturnType<typeof vi.fn>;
+    endSession: ReturnType<typeof vi.fn>;
+  }>;
+  let service: AllocationService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sessions = [];
+    connection.startSession.mockImplementation(() => {
+      const session = {
+        withTransaction: vi.fn(async (work) => work()),
+        endSession: vi.fn(),
+      };
+      sessions.push(session);
+      return Promise.resolve(session);
+    });
+    restaurantConfigModel.findOne.mockReturnValue(
+      queryResult({ tableCount: 3, chairsPerTable: 4 }),
+    );
+    tableModel.find.mockReturnValue(queryResult([]));
+    tableModel.bulkWrite.mockResolvedValue({ matchedCount: 0 });
+    partyModel.create.mockResolvedValue([]);
+    counterModel.findOneAndUpdate.mockResolvedValue({ sequence: 100 });
+
+    service = new AllocationService(
+      restaurantConfigModel as unknown as Model<RestaurantConfig>,
+      tableModel as unknown as Model<Table>,
+      partyModel as unknown as Model<Party>,
+      counterModel as unknown as Model<Counter>,
+      connection as unknown as Connection,
+    );
+  });
+
+  it('claims selected tables and persists a fully seated party', async () => {
+    const tables = [freeTable(1), freeTable(2)];
+    tableModel.find.mockReturnValue(queryResult(tables));
+    tableModel.bulkWrite.mockResolvedValue({ matchedCount: 2 });
+
+    const result = await service.allocate({ headcount: 6 });
+
+    expect(result).toMatchObject({
+      status: PartyStatus.SEATED,
+      originalHeadcount: 6,
+      seatedCount: 6,
+      queuedCount: 0,
+      tables: [
+        {
+          code: 'T1',
+          capacity: 4,
+          seatedCount: 4,
+          status: TableStatus.OCCUPIED,
+        },
+        {
+          code: 'T2',
+          capacity: 4,
+          seatedCount: 2,
+          status: TableStatus.PARTIAL,
+        },
+      ],
+      queue: null,
+    });
+    expect(tableModel.bulkWrite).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          updateOne: expect.objectContaining({
+            filter: expect.objectContaining({
+              _id: tables[0]._id,
+              status: TableStatus.FREE,
+              partyId: null,
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          updateOne: expect.objectContaining({
+            filter: expect.objectContaining({ _id: tables[1]._id }),
+          }),
+        }),
+      ],
+      { session: sessions[0] },
+    );
+    expect(counterModel.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(partyModel.create).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          originalHeadcount: 6,
+          seatedCount: 6,
+          queuedCount: 0,
+          status: PartyStatus.SEATED,
+          queueNumber: null,
+          assignments: [
+            expect.objectContaining({ seatedCount: 4 }),
+            expect.objectContaining({ seatedCount: 2 }),
+          ],
+        }),
+      ],
+      { session: sessions[0] },
+    );
+  });
+
+  it('persists a partially seated party and an atomic queue number', async () => {
+    const availableTable = freeTable(1);
+    tableModel.find.mockReturnValue(queryResult([availableTable]));
+    tableModel.bulkWrite.mockResolvedValue({ matchedCount: 1 });
+    counterModel.findOneAndUpdate.mockResolvedValue({ sequence: 104 });
+
+    const result = await service.allocate({ headcount: 6 });
+
+    expect(result).toMatchObject({
+      status: PartyStatus.PARTIALLY_SEATED,
+      seatedCount: 4,
+      queuedCount: 2,
+      tables: [
+        {
+          code: 'T1',
+          seatedCount: 4,
+          status: TableStatus.OCCUPIED,
+        },
+      ],
+      queue: { queueNumber: 104, headcount: 2 },
+    });
+    expect(counterModel.findOneAndUpdate).toHaveBeenCalledWith(
+      { key: 'queue' },
+      [
+        {
+          $set: {
+            sequence: { $add: [{ $ifNull: ['$sequence', 99] }, 1] },
+          },
+        },
+      ],
+      { new: true, upsert: true, session: sessions[0] },
+    );
+  });
+
+  it('queues the whole party when no table is free', async () => {
+    const result = await service.allocate({ headcount: 3 });
+
+    expect(result).toMatchObject({
+      status: PartyStatus.QUEUED,
+      seatedCount: 0,
+      queuedCount: 3,
+      tables: [],
+      queue: { queueNumber: 100, headcount: 3 },
+    });
+    expect(tableModel.bulkWrite).not.toHaveBeenCalled();
+  });
+
+  it('rejects a party larger than the physical restaurant capacity', async () => {
+    restaurantConfigModel.findOne.mockReturnValue(
+      queryResult({ tableCount: 2, chairsPerTable: 4 }),
+    );
+
+    await expect(service.allocate({ headcount: 9 })).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(tableModel.find).not.toHaveBeenCalled();
+    expect(partyModel.create).not.toHaveBeenCalled();
+    expect(sessions[0].endSession).toHaveBeenCalledOnce();
+  });
+
+  it('rejects allocation before the restaurant is configured', async () => {
+    restaurantConfigModel.findOne.mockReturnValue(queryResult(null));
+
+    await expect(service.allocate({ headcount: 2 })).rejects.toThrow(
+      ConflictException,
+    );
+    expect(tableModel.find).not.toHaveBeenCalled();
+  });
+
+  it('retries from fresh state when conditional table claiming loses a race', async () => {
+    const availableTable = freeTable(1);
+    tableModel.find.mockReturnValue(queryResult([availableTable]));
+    tableModel.bulkWrite
+      .mockResolvedValueOnce({ matchedCount: 0 })
+      .mockResolvedValueOnce({ matchedCount: 1 });
+
+    await expect(service.allocate({ headcount: 4 })).resolves.toMatchObject({
+      status: PartyStatus.SEATED,
+      seatedCount: 4,
+    });
+
+    expect(connection.startSession).toHaveBeenCalledTimes(2);
+    expect(tableModel.bulkWrite).toHaveBeenCalledTimes(2);
+    expect(partyModel.create).toHaveBeenCalledOnce();
+    expect(sessions[0].endSession).toHaveBeenCalledOnce();
+    expect(sessions[1].endSession).toHaveBeenCalledOnce();
+  });
+
+  it('returns a conflict after repeated conditional-claim failures', async () => {
+    tableModel.find.mockReturnValue(queryResult([freeTable(1)]));
+    tableModel.bulkWrite.mockResolvedValue({ matchedCount: 0 });
+
+    await expect(service.allocate({ headcount: 4 })).rejects.toThrow(
+      ConflictException,
+    );
+    expect(connection.startSession).toHaveBeenCalledTimes(3);
+    expect(partyModel.create).not.toHaveBeenCalled();
+  });
+});
