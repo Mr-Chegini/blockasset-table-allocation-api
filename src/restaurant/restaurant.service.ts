@@ -1,6 +1,6 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, Model } from 'mongoose';
+import type { Connection, Model } from 'mongoose';
 
 import { ConfigureRestaurantDto } from './dto/configure-restaurant.dto.js';
 import {

@@ -1,5 +1,5 @@
 import { ConflictException } from '@nestjs/common';
-import { Connection, Model } from 'mongoose';
+import type { Connection, Model } from 'mongoose';
 
 import { RestaurantConfig } from './schemas/restaurant-config.schema.js';
 import { Table, TableStatus } from './schemas/table.schema.js';

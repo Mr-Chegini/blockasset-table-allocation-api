@@ -5,7 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { ClientSession, Connection, Model, Types } from 'mongoose';
+import { Types } from 'mongoose';
+import type { ClientSession, Connection, Model } from 'mongoose';
 
 import {
   DEFAULT_RESTAURANT_CONFIG_KEY,
@@ -15,7 +16,8 @@ import { Table, TableStatus } from '../restaurant/schemas/table.schema.js';
 import { CreateAllocationDto } from './dto/create-allocation.dto.js';
 import { Counter, QUEUE_COUNTER_KEY } from './schemas/counter.schema.js';
 import { Party, PartyStatus } from './schemas/party.schema.js';
-import { AvailableTable, selectTables } from './table-selector.js';
+import { selectTables } from './table-selector.js';
+import type { AvailableTable } from './table-selector.js';
 
 const MAX_ALLOCATION_ATTEMPTS = 3;
 
