@@ -17,7 +17,11 @@ export class AllocationController {
   constructor(private readonly allocationService: AllocationService) {}
 
   @Post('allocations')
-  @ApiOperation({ summary: 'Seat a party and queue any unseated guests' })
+  @ApiOperation({
+    summary: 'Seat a party and queue any unseated guests',
+    description:
+      'When an active queue exists, the new party joins it without claiming free tables.',
+  })
   @ApiCreatedResponse({ description: 'Party allocation was persisted' })
   @ApiBadRequestResponse({
     description: 'Headcount is invalid or exceeds physical capacity',

@@ -14,6 +14,14 @@ function queryResult<T>(value: T) {
   return { session, lean };
 }
 
+function sortedQueryResult<T>(value: T) {
+  const lean = vi.fn().mockResolvedValue(value);
+  const session = vi.fn().mockReturnValue({ lean });
+  const sort = vi.fn().mockReturnValue({ lean, session });
+
+  return { sort, session, lean };
+}
+
 function freeTable(tableNumber: number, capacity = 4) {
   return {
     _id: new Types.ObjectId(),
@@ -36,6 +44,7 @@ describe('AllocationService', () => {
   };
   const partyModel = {
     create: vi.fn(),
+    exists: vi.fn(),
     find: vi.fn(),
     findById: vi.fn(),
     findOneAndUpdate: vi.fn(),
@@ -67,6 +76,9 @@ describe('AllocationService', () => {
     tableModel.bulkWrite.mockResolvedValue({ matchedCount: 0 });
     tableModel.findOneAndUpdate.mockResolvedValue({});
     partyModel.create.mockResolvedValue([]);
+    partyModel.exists.mockReturnValue({
+      session: vi.fn().mockResolvedValue(null),
+    });
     partyModel.findOneAndUpdate.mockResolvedValue({});
     counterModel.findOneAndUpdate.mockResolvedValue({ sequence: 100 });
 
@@ -197,6 +209,25 @@ describe('AllocationService', () => {
     expect(tableModel.bulkWrite).not.toHaveBeenCalled();
   });
 
+  it('queues a new party without claiming free tables while a queue is active', async () => {
+    partyModel.exists.mockReturnValue({
+      session: vi.fn().mockResolvedValue({ _id: new Types.ObjectId() }),
+    });
+    tableModel.find.mockReturnValue(queryResult([freeTable(1)]));
+
+    const result = await service.allocate({ headcount: 3 });
+
+    expect(result).toMatchObject({
+      status: PartyStatus.QUEUED,
+      seatedCount: 0,
+      queuedCount: 3,
+      tables: [],
+      queue: { queueNumber: 100, headcount: 3 },
+    });
+    expect(tableModel.find).not.toHaveBeenCalled();
+    expect(tableModel.bulkWrite).not.toHaveBeenCalled();
+  });
+
   it('rejects a party larger than the physical restaurant capacity', async () => {
     restaurantConfigModel.findOne.mockReturnValue(
       queryResult({ tableCount: 2, chairsPerTable: 4 }),
@@ -298,6 +329,212 @@ describe('AllocationService', () => {
         ],
       });
       expect(sort).toHaveBeenCalledWith({ queueNumber: 1 });
+    });
+  });
+
+  describe('processQueue', () => {
+    it('returns an empty outcome when there is no active queue', async () => {
+      partyModel.find.mockReturnValue(sortedQueryResult([]));
+
+      await expect(service.processQueue()).resolves.toEqual({
+        outcome: 'queue_empty',
+        processedCount: 0,
+        totalSeatedNow: 0,
+        remainingQueuedParties: 0,
+        processedParties: [],
+      });
+      expect(tableModel.find).not.toHaveBeenCalled();
+    });
+
+    it('returns no capacity without changing a queued party', async () => {
+      partyModel.find.mockReturnValue(
+        sortedQueryResult([
+          {
+            _id: new Types.ObjectId(),
+            seatedCount: 0,
+            queuedCount: 4,
+            queueNumber: 100,
+            status: PartyStatus.QUEUED,
+          },
+        ]),
+      );
+
+      await expect(service.processQueue()).resolves.toEqual({
+        outcome: 'no_capacity',
+        processedCount: 0,
+        totalSeatedNow: 0,
+        remainingQueuedParties: 1,
+        processedParties: [],
+      });
+      expect(tableModel.bulkWrite).not.toHaveBeenCalled();
+      expect(partyModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('fully seats queued parties in FIFO order while capacity remains', async () => {
+      const parties = [
+        {
+          _id: new Types.ObjectId(),
+          seatedCount: 0,
+          queuedCount: 2,
+          queueNumber: 100,
+          status: PartyStatus.QUEUED,
+        },
+        {
+          _id: new Types.ObjectId(),
+          seatedCount: 0,
+          queuedCount: 5,
+          queueNumber: 101,
+          status: PartyStatus.QUEUED,
+        },
+      ];
+      partyModel.find.mockReturnValue(sortedQueryResult(parties));
+      tableModel.find.mockReturnValue(
+        queryResult([freeTable(1), freeTable(2), freeTable(3)]),
+      );
+      tableModel.bulkWrite
+        .mockResolvedValueOnce({ matchedCount: 1 })
+        .mockResolvedValueOnce({ matchedCount: 2 });
+
+      const result = await service.processQueue();
+
+      expect(result).toMatchObject({
+        outcome: 'processed',
+        processedCount: 2,
+        totalSeatedNow: 7,
+        remainingQueuedParties: 0,
+        processedParties: [
+          {
+            partyId: parties[0]._id.toString(),
+            queueNumber: 100,
+            status: PartyStatus.SEATED,
+            seatedNow: 2,
+            seatedCount: 2,
+            queuedCount: 0,
+            tables: [{ code: 'T1', seatedCount: 2 }],
+          },
+          {
+            partyId: parties[1]._id.toString(),
+            queueNumber: 101,
+            status: PartyStatus.SEATED,
+            seatedNow: 5,
+            seatedCount: 5,
+            queuedCount: 0,
+            tables: [{ code: 'T2' }, { code: 'T3' }],
+          },
+        ],
+      });
+      expect(
+        partyModel.findOneAndUpdate.mock.calls.map(
+          ([filter]) => filter.queueNumber,
+        ),
+      ).toEqual([100, 101]);
+    });
+
+    it('partially seats only the oldest party and leaves newer parties untouched', async () => {
+      const parties = [
+        {
+          _id: new Types.ObjectId(),
+          seatedCount: 0,
+          queuedCount: 6,
+          queueNumber: 100,
+          status: PartyStatus.QUEUED,
+        },
+        {
+          _id: new Types.ObjectId(),
+          seatedCount: 0,
+          queuedCount: 2,
+          queueNumber: 101,
+          status: PartyStatus.QUEUED,
+        },
+      ];
+      partyModel.find.mockReturnValue(sortedQueryResult(parties));
+      tableModel.find.mockReturnValue(queryResult([freeTable(1)]));
+      tableModel.bulkWrite.mockResolvedValue({ matchedCount: 1 });
+
+      await expect(service.processQueue()).resolves.toMatchObject({
+        outcome: 'processed',
+        processedCount: 1,
+        totalSeatedNow: 4,
+        remainingQueuedParties: 2,
+        processedParties: [
+          {
+            partyId: parties[0]._id.toString(),
+            queueNumber: 100,
+            status: PartyStatus.PARTIALLY_SEATED,
+            seatedNow: 4,
+            queuedCount: 2,
+          },
+        ],
+      });
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledOnce();
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ queueNumber: 100, queuedCount: 6 }),
+        expect.objectContaining({
+          $inc: { seatedCount: 4, queuedCount: -4 },
+        }),
+        expect.objectContaining({ session: sessions[0] }),
+      );
+    });
+
+    it('appends assignments when finishing a previously partial party', async () => {
+      const party = {
+        _id: new Types.ObjectId(),
+        seatedCount: 4,
+        queuedCount: 2,
+        queueNumber: 100,
+        status: PartyStatus.PARTIALLY_SEATED,
+      };
+      partyModel.find.mockReturnValue(sortedQueryResult([party]));
+      tableModel.find.mockReturnValue(queryResult([freeTable(2)]));
+      tableModel.bulkWrite.mockResolvedValue({ matchedCount: 1 });
+
+      await expect(service.processQueue()).resolves.toMatchObject({
+        processedParties: [
+          {
+            status: PartyStatus.SEATED,
+            seatedNow: 2,
+            seatedCount: 6,
+            queuedCount: 0,
+          },
+        ],
+      });
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: party._id, queuedCount: 2 }),
+        expect.objectContaining({
+          $inc: { seatedCount: 2, queuedCount: -2 },
+          $push: {
+            assignments: {
+              $each: [expect.objectContaining({ seatedCount: 2 })],
+            },
+          },
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it('retries from fresh state when the queued party changes concurrently', async () => {
+      const party = {
+        _id: new Types.ObjectId(),
+        seatedCount: 0,
+        queuedCount: 4,
+        queueNumber: 100,
+        status: PartyStatus.QUEUED,
+      };
+      partyModel.find.mockReturnValue(sortedQueryResult([party]));
+      tableModel.find.mockReturnValue(queryResult([freeTable(1)]));
+      tableModel.bulkWrite.mockResolvedValue({ matchedCount: 1 });
+      partyModel.findOneAndUpdate
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({});
+
+      await expect(service.processQueue()).resolves.toMatchObject({
+        outcome: 'processed',
+        processedCount: 1,
+      });
+      expect(connection.startSession).toHaveBeenCalledTimes(2);
+      expect(tableModel.bulkWrite).toHaveBeenCalledTimes(2);
+      expect(sessions[0].endSession).toHaveBeenCalledOnce();
+      expect(sessions[1].endSession).toHaveBeenCalledOnce();
     });
   });
 

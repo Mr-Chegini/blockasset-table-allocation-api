@@ -6,6 +6,7 @@ import { AllocationController } from './allocation.controller.js';
 import { AllocationService } from './allocation.service.js';
 import { Counter, CounterSchema } from './schemas/counter.schema.js';
 import { Party, PartySchema } from './schemas/party.schema.js';
+import { QueueProcessingController } from './queue-processing.controller.js';
 import { TableReleaseController } from './table-release.controller.js';
 
 @Module({
@@ -16,7 +17,11 @@ import { TableReleaseController } from './table-release.controller.js';
       { name: Party.name, schema: PartySchema },
     ]),
   ],
-  controllers: [AllocationController, TableReleaseController],
+  controllers: [
+    AllocationController,
+    QueueProcessingController,
+    TableReleaseController,
+  ],
   providers: [AllocationService],
 })
 export class AllocationModule {}
