@@ -69,7 +69,7 @@ describe('RestaurantService', () => {
           $set: { tableCount: 3, chairsPerTable: 4 },
         }),
         expect.objectContaining({
-          new: true,
+          returnDocument: 'after',
           upsert: true,
           runValidators: true,
           session,

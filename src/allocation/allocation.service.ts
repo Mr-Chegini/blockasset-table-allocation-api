@@ -203,7 +203,7 @@ export class AllocationService {
               occupiedSeats: 0,
             },
           },
-          { new: true, session },
+          { returnDocument: 'after', session },
         );
 
         if (releasedTable === null) {
@@ -235,7 +235,7 @@ export class AllocationService {
                 'assignment.releasedAt': null,
               },
             ],
-            new: true,
+            returnDocument: 'after',
             session,
           },
         );
@@ -422,7 +422,12 @@ export class AllocationService {
           },
         },
       ],
-      { new: true, upsert: true, session },
+      {
+        returnDocument: 'after',
+        upsert: true,
+        updatePipeline: true,
+        session,
+      },
     );
 
     if (counter === null) {

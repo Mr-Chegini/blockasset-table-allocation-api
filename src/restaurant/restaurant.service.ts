@@ -58,7 +58,7 @@ export class RestaurantService {
             $setOnInsert: { key: DEFAULT_RESTAURANT_CONFIG_KEY },
           },
           {
-            new: true,
+            returnDocument: 'after',
             upsert: true,
             runValidators: true,
             session,

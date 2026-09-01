@@ -175,7 +175,12 @@ describe('AllocationService', () => {
           },
         },
       ],
-      { new: true, upsert: true, session: sessions[0] },
+      {
+        returnDocument: 'after',
+        upsert: true,
+        updatePipeline: true,
+        session: sessions[0],
+      },
     );
   });
 
@@ -340,7 +345,7 @@ describe('AllocationService', () => {
             occupiedSeats: 0,
           },
         },
-        { new: true, session: sessions[0] },
+        { returnDocument: 'after', session: sessions[0] },
       );
       expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ _id: partyId }),
@@ -351,7 +356,10 @@ describe('AllocationService', () => {
             status: PartyStatus.COMPLETED,
           }),
         }),
-        expect.objectContaining({ new: true, session: sessions[0] }),
+        expect.objectContaining({
+          returnDocument: 'after',
+          session: sessions[0],
+        }),
       );
     });
 
