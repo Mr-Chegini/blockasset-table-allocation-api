@@ -25,6 +25,19 @@ export class RestaurantService {
 
     try {
       await session.withTransaction(async () => {
+        const queuedParty = await this.connection
+          .collection('parties')
+          .findOne(
+            { queuedCount: { $gt: 0 } },
+            { projection: { _id: 1 }, session },
+          );
+
+        if (queuedParty) {
+          throw new ConflictException(
+            'Restaurant cannot be reconfigured while guests are queued',
+          );
+        }
+
         const tableInUse = await this.tableModel
           .exists({ status: { $ne: TableStatus.FREE } })
           .session(session);

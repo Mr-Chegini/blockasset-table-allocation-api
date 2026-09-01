@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
@@ -41,6 +42,22 @@ export interface AllocationResponse {
     status: TableStatus.PARTIAL | TableStatus.OCCUPIED;
   }>;
   queue: { queueNumber: number; headcount: number } | null;
+}
+
+export interface TableReleaseResponse {
+  table: {
+    code: string;
+    status: TableStatus.FREE;
+    releasedSeats: number;
+  };
+  party: {
+    partyId: string;
+    status: PartyStatus;
+    seatedCount: number;
+    queuedCount: number;
+    departedCount: number;
+  };
+  queueReprocessed: false;
 }
 
 @Injectable()
@@ -97,6 +114,163 @@ export class AllocationService {
     }
 
     throw new ConflictException('Unable to allocate tables; please retry');
+  }
+
+  async getQueue() {
+    const parties = await this.partyModel
+      .find(
+        {
+          queuedCount: { $gt: 0 },
+          status: {
+            $in: [PartyStatus.QUEUED, PartyStatus.PARTIALLY_SEATED],
+          },
+        },
+        {
+          originalHeadcount: 1,
+          seatedCount: 1,
+          queuedCount: 1,
+          queueNumber: 1,
+          createdAt: 1,
+        },
+      )
+      .sort({ queueNumber: 1 })
+      .lean();
+
+    return {
+      count: parties.length,
+      entries: parties.map((party, index) => ({
+        position: index + 1,
+        partyId: party._id.toString(),
+        queueNumber: party.queueNumber,
+        headcount: party.queuedCount,
+        originalHeadcount: party.originalHeadcount,
+        seatedCount: party.seatedCount,
+        queuedAt: party.createdAt,
+      })),
+    };
+  }
+
+  async releaseTable(code: string): Promise<TableReleaseResponse> {
+    const session = await this.connection.startSession();
+
+    try {
+      let response: TableReleaseResponse | undefined;
+
+      await session.withTransaction(async () => {
+        const table = await this.tableModel
+          .findOne({ code })
+          .session(session)
+          .lean();
+
+        if (table === null) {
+          throw new NotFoundException(`Table ${code} was not found`);
+        }
+
+        if (table.status === TableStatus.FREE || table.partyId === null) {
+          throw new ConflictException(`Table ${code} is already free`);
+        }
+
+        const party = await this.partyModel
+          .findById(table.partyId)
+          .session(session)
+          .lean();
+
+        if (party === null) {
+          throw new ConflictException(
+            `Table ${code} has no corresponding active party`,
+          );
+        }
+
+        const releasedAt = new Date();
+        const seatedCount = party.seatedCount - table.occupiedSeats;
+        const departedCount = party.departedCount + table.occupiedSeats;
+        const status = this.getStatusAfterRelease(
+          seatedCount,
+          party.queuedCount,
+        );
+        const completedAt =
+          status === PartyStatus.COMPLETED ? releasedAt : null;
+        const releasedTable = await this.tableModel.findOneAndUpdate(
+          {
+            _id: table._id,
+            status: table.status,
+            partyId: table.partyId,
+          },
+          {
+            $set: {
+              status: TableStatus.FREE,
+              partyId: null,
+              occupiedSeats: 0,
+            },
+          },
+          { new: true, session },
+        );
+
+        if (releasedTable === null) {
+          throw new ConflictException(
+            `Table ${code} changed while it was being released`,
+          );
+        }
+
+        const updatedParty = await this.partyModel.findOneAndUpdate(
+          {
+            _id: party._id,
+            assignments: {
+              $elemMatch: { tableId: table._id, releasedAt: null },
+            },
+          },
+          {
+            $set: {
+              seatedCount,
+              departedCount,
+              status,
+              completedAt,
+              'assignments.$[assignment].releasedAt': releasedAt,
+            },
+          },
+          {
+            arrayFilters: [
+              {
+                'assignment.tableId': table._id,
+                'assignment.releasedAt': null,
+              },
+            ],
+            new: true,
+            session,
+          },
+        );
+
+        if (updatedParty === null) {
+          throw new ConflictException(
+            `The assignment for table ${code} is no longer active`,
+          );
+        }
+
+        response = {
+          table: {
+            code: table.code,
+            status: TableStatus.FREE,
+            releasedSeats: table.occupiedSeats,
+          },
+          party: {
+            partyId: party._id.toString(),
+            status,
+            seatedCount,
+            queuedCount: party.queuedCount,
+            departedCount,
+          },
+          queueReprocessed: false,
+        };
+      });
+
+      if (response === undefined) {
+        throw new Error('Release transaction completed without a response');
+      }
+
+      return response;
+    } finally {
+      await session.endSession();
+    }
   }
 
   private async allocateInTransaction(
@@ -262,6 +436,23 @@ export class AllocationService {
     seatedCount: number,
     queuedCount: number,
   ): PartyStatus {
+    if (queuedCount === 0) {
+      return PartyStatus.SEATED;
+    }
+
+    return seatedCount === 0
+      ? PartyStatus.QUEUED
+      : PartyStatus.PARTIALLY_SEATED;
+  }
+
+  private getStatusAfterRelease(
+    seatedCount: number,
+    queuedCount: number,
+  ): PartyStatus {
+    if (seatedCount === 0 && queuedCount === 0) {
+      return PartyStatus.COMPLETED;
+    }
+
     if (queuedCount === 0) {
       return PartyStatus.SEATED;
     }

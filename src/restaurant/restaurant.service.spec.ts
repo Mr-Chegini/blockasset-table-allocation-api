@@ -21,6 +21,10 @@ describe('RestaurantService', () => {
   };
   const connection = {
     startSession: vi.fn(),
+    collection: vi.fn(),
+  };
+  const partyCollection = {
+    findOne: vi.fn(),
   };
 
   let service: RestaurantService;
@@ -29,6 +33,8 @@ describe('RestaurantService', () => {
     vi.clearAllMocks();
     session.withTransaction.mockImplementation(async (work) => work());
     connection.startSession.mockResolvedValue(session);
+    connection.collection.mockReturnValue(partyCollection);
+    partyCollection.findOne.mockResolvedValue(null);
     tableModel.exists.mockReturnValue({
       session: vi.fn().mockResolvedValue(null),
     });
@@ -105,6 +111,19 @@ describe('RestaurantService', () => {
       expect(restaurantConfigModel.findOneAndUpdate).not.toHaveBeenCalled();
       expect(tableModel.deleteMany).not.toHaveBeenCalled();
       expect(tableModel.insertMany).not.toHaveBeenCalled();
+      expect(session.endSession).toHaveBeenCalledOnce();
+    });
+
+    it('rejects reconfiguration while guests remain queued', async () => {
+      partyCollection.findOne.mockResolvedValue({ _id: 'queued-party' });
+
+      await expect(
+        service.configure({ tableCount: 2, chairsPerTable: 2 }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(tableModel.exists).not.toHaveBeenCalled();
+      expect(restaurantConfigModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(tableModel.deleteMany).not.toHaveBeenCalled();
       expect(session.endSession).toHaveBeenCalledOnce();
     });
   });

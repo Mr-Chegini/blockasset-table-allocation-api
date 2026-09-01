@@ -47,6 +47,10 @@ export const TableAssignmentSchema =
   versionKey: false,
 })
 export class Party {
+  createdAt: Date;
+
+  updatedAt: Date;
+
   @Prop({
     required: true,
     min: 1,

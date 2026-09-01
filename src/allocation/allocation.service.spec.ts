@@ -28,8 +28,18 @@ function freeTable(tableNumber: number, capacity = 4) {
 
 describe('AllocationService', () => {
   const restaurantConfigModel = { findOne: vi.fn() };
-  const tableModel = { find: vi.fn(), bulkWrite: vi.fn() };
-  const partyModel = { create: vi.fn() };
+  const tableModel = {
+    find: vi.fn(),
+    findOne: vi.fn(),
+    findOneAndUpdate: vi.fn(),
+    bulkWrite: vi.fn(),
+  };
+  const partyModel = {
+    create: vi.fn(),
+    find: vi.fn(),
+    findById: vi.fn(),
+    findOneAndUpdate: vi.fn(),
+  };
   const counterModel = { findOneAndUpdate: vi.fn() };
   const connection = { startSession: vi.fn() };
 
@@ -55,7 +65,9 @@ describe('AllocationService', () => {
     );
     tableModel.find.mockReturnValue(queryResult([]));
     tableModel.bulkWrite.mockResolvedValue({ matchedCount: 0 });
+    tableModel.findOneAndUpdate.mockResolvedValue({});
     partyModel.create.mockResolvedValue([]);
+    partyModel.findOneAndUpdate.mockResolvedValue({});
     counterModel.findOneAndUpdate.mockResolvedValue({ sequence: 100 });
 
     service = new AllocationService(
@@ -230,5 +242,164 @@ describe('AllocationService', () => {
     );
     expect(connection.startSession).toHaveBeenCalledTimes(3);
     expect(partyModel.create).not.toHaveBeenCalled();
+  });
+
+  describe('getQueue', () => {
+    it('returns active queued parties in queue-number order with positions', async () => {
+      const queuedAt = new Date('2026-09-02T08:00:00.000Z');
+      const parties = [
+        {
+          _id: new Types.ObjectId(),
+          originalHeadcount: 6,
+          seatedCount: 4,
+          queuedCount: 2,
+          queueNumber: 100,
+          createdAt: queuedAt,
+        },
+        {
+          _id: new Types.ObjectId(),
+          originalHeadcount: 3,
+          seatedCount: 0,
+          queuedCount: 3,
+          queueNumber: 101,
+          createdAt: queuedAt,
+        },
+      ];
+      const lean = vi.fn().mockResolvedValue(parties);
+      const sort = vi.fn().mockReturnValue({ lean });
+      partyModel.find.mockReturnValue({ sort });
+
+      await expect(service.getQueue()).resolves.toEqual({
+        count: 2,
+        entries: [
+          {
+            position: 1,
+            partyId: parties[0]._id.toString(),
+            queueNumber: 100,
+            headcount: 2,
+            originalHeadcount: 6,
+            seatedCount: 4,
+            queuedAt,
+          },
+          {
+            position: 2,
+            partyId: parties[1]._id.toString(),
+            queueNumber: 101,
+            headcount: 3,
+            originalHeadcount: 3,
+            seatedCount: 0,
+            queuedAt,
+          },
+        ],
+      });
+      expect(sort).toHaveBeenCalledWith({ queueNumber: 1 });
+    });
+  });
+
+  describe('releaseTable', () => {
+    it('frees the table and completes a party after its final release', async () => {
+      const partyId = new Types.ObjectId();
+      const occupiedTable = {
+        ...freeTable(1),
+        status: TableStatus.OCCUPIED,
+        partyId,
+        occupiedSeats: 4,
+      };
+      const party = {
+        _id: partyId,
+        seatedCount: 4,
+        queuedCount: 0,
+        departedCount: 0,
+      };
+      tableModel.findOne.mockReturnValue(queryResult(occupiedTable));
+      partyModel.findById.mockReturnValue(queryResult(party));
+
+      const result = await service.releaseTable('T1');
+
+      expect(result).toEqual({
+        table: {
+          code: 'T1',
+          status: TableStatus.FREE,
+          releasedSeats: 4,
+        },
+        party: {
+          partyId: partyId.toString(),
+          status: PartyStatus.COMPLETED,
+          seatedCount: 0,
+          queuedCount: 0,
+          departedCount: 4,
+        },
+        queueReprocessed: false,
+      });
+      expect(tableModel.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: occupiedTable._id, partyId }),
+        {
+          $set: {
+            status: TableStatus.FREE,
+            partyId: null,
+            occupiedSeats: 0,
+          },
+        },
+        { new: true, session: sessions[0] },
+      );
+      expect(partyModel.findOneAndUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _id: partyId }),
+        expect.objectContaining({
+          $set: expect.objectContaining({
+            seatedCount: 0,
+            departedCount: 4,
+            status: PartyStatus.COMPLETED,
+          }),
+        }),
+        expect.objectContaining({ new: true, session: sessions[0] }),
+      );
+    });
+
+    it('keeps queued guests queued and does not auto-process the queue', async () => {
+      const partyId = new Types.ObjectId();
+      const occupiedTable = {
+        ...freeTable(1),
+        status: TableStatus.OCCUPIED,
+        partyId,
+        occupiedSeats: 4,
+      };
+      tableModel.findOne.mockReturnValue(queryResult(occupiedTable));
+      partyModel.findById.mockReturnValue(
+        queryResult({
+          _id: partyId,
+          seatedCount: 4,
+          queuedCount: 2,
+          departedCount: 0,
+        }),
+      );
+
+      await expect(service.releaseTable('T1')).resolves.toMatchObject({
+        party: {
+          status: PartyStatus.QUEUED,
+          seatedCount: 0,
+          queuedCount: 2,
+        },
+        queueReprocessed: false,
+      });
+    });
+
+    it('rejects an unknown table', async () => {
+      tableModel.findOne.mockReturnValue(queryResult(null));
+
+      await expect(service.releaseTable('T99')).rejects.toThrow(
+        'Table T99 was not found',
+      );
+      expect(partyModel.findById).not.toHaveBeenCalled();
+      expect(sessions[0].endSession).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a table that is already free', async () => {
+      tableModel.findOne.mockReturnValue(queryResult(freeTable(1)));
+
+      await expect(service.releaseTable('T1')).rejects.toThrow(
+        'Table T1 is already free',
+      );
+      expect(tableModel.findOneAndUpdate).not.toHaveBeenCalled();
+    });
   });
 });
