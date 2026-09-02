@@ -1,11 +1,14 @@
 {
   "name": "blockasset-table-allocation-api",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "",
-  "author": "",
+  "author": "Amir Chegini",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "nest build",
     "deploy": "nest deploy",

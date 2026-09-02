@@ -36,6 +36,13 @@ describe('selectTables', () => {
     expect(result.unusedSeats).toBe(0);
   });
 
+  it('finds the best-fit pair across non-adjacent, differing capacities', () => {
+    const result = selectTables(10, [table(1, 8), table(2, 5), table(3, 5)]);
+
+    expect(result.selectedTables).toEqual([table(2, 5), table(3, 5)]);
+    expect(result.unusedSeats).toBe(0);
+  });
+
   it('uses table number as a deterministic final tie-break', () => {
     const result = selectTables(6, [table(3, 4), table(1, 4), table(2, 4)]);
 
