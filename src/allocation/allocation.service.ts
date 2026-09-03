@@ -222,9 +222,7 @@ export class AllocationService {
     throw new ConflictException('Unable to process the queue; please retry');
   }
 
-  async cancelQueuedParty(
-    partyId: string,
-  ): Promise<QueueCancellationResponse> {
+  async cancelQueuedParty(partyId: string): Promise<QueueCancellationResponse> {
     if (!Types.ObjectId.isValid(partyId)) {
       throw new NotFoundException(`Party ${partyId} was not found`);
     }
@@ -261,9 +259,7 @@ export class AllocationService {
           const cancelledNow = party.queuedCount;
           const cancelledCount = (party.cancelledCount ?? 0) + cancelledNow;
           const status =
-            party.seatedCount > 0
-              ? PartyStatus.SEATED
-              : PartyStatus.COMPLETED;
+            party.seatedCount > 0 ? PartyStatus.SEATED : PartyStatus.COMPLETED;
           const completedAt =
             status === PartyStatus.COMPLETED ? cancelledAt : null;
           const updatedParty = await this.partyModel.findOneAndUpdate(

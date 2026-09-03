@@ -174,6 +174,26 @@ describe('Table allocation API (e2e)', () => {
       });
   });
 
+  it.each([
+    { headcount: 0, caseName: 'zero' },
+    { headcount: -1, caseName: 'negative' },
+    { headcount: 1.5, caseName: 'non-integer' },
+  ])('rejects a $caseName headcount with HTTP 400', async ({ headcount }) => {
+    await configureRestaurant(2, 4);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/customer/allocations')
+      .send({ headcount })
+      .expect(400);
+
+    expect(await connection.collection('parties').countDocuments()).toBe(0);
+    expect(
+      await connection
+        .collection('tables')
+        .countDocuments({ status: { $ne: 'free' } }),
+    ).toBe(0);
+  });
+
   it('cancels a fully queued party so a newer party can use free capacity', async () => {
     await configureRestaurant(1, 4);
 

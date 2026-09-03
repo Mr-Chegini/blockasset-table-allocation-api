@@ -670,7 +670,9 @@ describe('AllocationService', () => {
 
       await expect(
         service.cancelQueuedParty(partyId.toString()),
-      ).rejects.toThrow(`Party ${partyId.toString()} has no active queued guests`);
+      ).rejects.toThrow(
+        `Party ${partyId.toString()} has no active queued guests`,
+      );
       expect(partyModel.findOneAndUpdate).not.toHaveBeenCalled();
     });
 

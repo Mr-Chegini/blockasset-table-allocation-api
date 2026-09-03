@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS dependencies
+FROM node:22.23.2-bookworm-slim AS dependencies
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ FROM dependencies AS production-dependencies
 
 RUN npm prune --omit=dev && npm cache clean --force
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22.23.2-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 ENV PORT=3000

@@ -138,9 +138,10 @@ occupancy remains separate so tables can be queried and claimed atomically.
 
 ## Local development and tests
 
-For hot reload, install Node.js 22+ and npm. MongoDB continues to run in Docker.
-If the full Docker stack is already running, stop its API container first with
-`docker compose stop api` so the local process can use port `3000`.
+For hot reload, install Node.js 22.22.3+ (or 24.15.0+) and npm. MongoDB
+continues to run in Docker. If the full Docker stack is already running, stop
+its API container first with `docker compose stop api` so the local process can
+use port `3000`.
 
 Set up and start the local API with:
 
