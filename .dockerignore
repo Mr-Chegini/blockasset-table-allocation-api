@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.npmrc
+node_modules
+dist
+coverage
+test
+**/*.spec.ts
+*.log
+*.tsbuildinfo
+.idea
+.vscode
+*.md

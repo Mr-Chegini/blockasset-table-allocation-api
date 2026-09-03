@@ -1,275 +1,157 @@
 # BlockAsset Table Allocation API
 
-A standalone NestJS and MongoDB API for restaurant table allocation, partial
-seating, and queue management.
+A standalone REST API for restaurant table allocation, partial seating, and
+FIFO queue management, built with NestJS, TypeScript, and MongoDB.
 
-## Requirements
+## Quick start with Docker
 
-- Node.js 22+
-- npm
-- Docker with Docker Compose
-
-MongoDB transactions require a replica set. The included Compose service starts
-a single-node replica set suitable for local development and tests.
-
-## Setup
+You need only Git and Docker with Docker Compose. Node.js, npm, and MongoDB do
+not need to be installed on the host.
 
 ```bash
-npm install
-cp .env.example .env
-docker compose up -d
-npm run start:dev
+git clone <repository-url>
+cd blockasset-table-allocation-api
+docker compose up --build -d
 ```
 
-The API is available at `http://localhost:3000/api/v1`. Swagger documentation is
-available at `http://localhost:3000/docs`.
-
-There is no separate seed command. The configuration endpoint creates the
-restaurant configuration and generates its tables atomically.
-
-## API
-
-### Health
+Compose starts a single-node MongoDB replica set, waits for it to become
+healthy, and then starts the API. Check both services with:
 
 ```bash
+docker compose ps
 curl http://localhost:3000/api/v1/health
 ```
 
-### Configure the restaurant
+- API base URL: `http://localhost:3000/api/v1`
+- Swagger UI: `http://localhost:3000/docs`
+- MongoDB Compass:
+  `mongodb://localhost:27017/blockasset?replicaSet=rs0&directConnection=true`
 
-Creates or replaces the configuration and generates `T1` through `Tn`:
+There is no separate seed command. Configure the restaurant to create its
+tables and initial database records:
 
 ```bash
 curl -X PUT http://localhost:3000/api/v1/owner/restaurant/configuration \
   -H 'Content-Type: application/json' \
-  -d '{"tableCount": 3, "chairsPerTable": 4}'
+  -d '{"tableCount":3,"chairsPerTable":4}'
 ```
 
-Reconfiguration returns `409 Conflict` while any table is in use or any guests
-remain queued.
+## API reference
 
-### View table state
+| Method  | Route                             | Purpose                                         |
+| ------- | --------------------------------- | ----------------------------------------------- |
+| `GET`   | `/health`                         | Check API availability                          |
+| `PUT`   | `/owner/restaurant/configuration` | Configure the restaurant and generate `T1...Tn` |
+| `GET`   | `/owner/restaurant/tables`        | View tables, occupancy, and status counts       |
+| `PATCH` | `/owner/tables/:code/release`     | Release a table when its guests leave           |
+| `POST`  | `/owner/queue/process`            | Allocate available tables to queued parties     |
+| `PATCH` | `/owner/queue/:partyId/cancel`    | Cancel a party's remaining queued guests        |
+| `POST`  | `/customer/allocations`           | Allocate tables or queue a party                |
+| `GET`   | `/customer/queue`                 | View active queue positions and queue numbers   |
+
+All routes use the `/api/v1` prefix. Example requests:
 
 ```bash
+# View table state
 curl http://localhost:3000/api/v1/owner/restaurant/tables
-```
 
-The response includes every table in numeric order and counts for `free`,
-`partial`, and `occupied` states.
-
-### Allocate a party
-
-```bash
+# Allocate a party
 curl -X POST http://localhost:3000/api/v1/customer/allocations \
   -H 'Content-Type: application/json' \
-  -d '{"headcount": 7}'
-```
+  -d '{"headcount":7}'
 
-Example partial-allocation response:
-
-```json
-{
-  "partyId": "68b7...",
-  "status": "partially_seated",
-  "originalHeadcount": 7,
-  "seatedCount": 4,
-  "queuedCount": 3,
-  "tables": [
-    {
-      "code": "T1",
-      "capacity": 4,
-      "seatedCount": 4,
-      "status": "occupied"
-    }
-  ],
-  "queue": {
-    "queueNumber": 100,
-    "headcount": 3
-  }
-}
-```
-
-Headcount must be a positive integer and cannot exceed the restaurant's physical
-capacity (`tableCount × chairsPerTable`). Invalid input returns `400 Bad Request`.
-
-### View the queue
-
-```bash
+# View and process the queue
 curl http://localhost:3000/api/v1/customer/queue
-```
+curl -X POST http://localhost:3000/api/v1/owner/queue/process
 
-Queue numbers are permanent and monotonically increasing. Positions are computed
-from the currently active queue.
+# Release a table
+curl -X PATCH http://localhost:3000/api/v1/owner/tables/T1/release
 
-### Cancel queued guests
-
-An owner or staff member can cancel the remaining queued portion of a party by
-its stable party ID:
-
-```bash
+# Cancel the queued remainder of a party
 curl -X PATCH \
   http://localhost:3000/api/v1/owner/queue/68b700000000000000000001/cancel
 ```
 
-For a fully queued party, all waiting guests are recorded as cancelled and the
-party becomes `completed`. For a partially seated party, only the queued
-remainder is cancelled; its occupied tables and assignment history are unchanged,
-and the party becomes `seated`. The original queue number is retained for audit
-history.
+Swagger documents the complete request and response shapes.
 
-Cancellation does not automatically process the next party. It returns `404 Not
-Found` for an unknown party and `409 Conflict` when the party has no active queued
-guests. Repeating a successful cancellation therefore returns `409`; the endpoint
-is intentionally non-idempotent.
+## Allocation rules and design decisions
 
-### Process the queue
-
-Queue processing is an explicit staff action:
-
-```bash
-curl -X POST http://localhost:3000/api/v1/owner/queue/process
-```
-
-Example response when the oldest party can be seated only partially:
-
-```json
-{
-  "outcome": "processed",
-  "processedCount": 1,
-  "totalSeatedNow": 4,
-  "remainingQueuedParties": 2,
-  "processedParties": [
-    {
-      "partyId": "68b7...",
-      "queueNumber": 100,
-      "status": "partially_seated",
-      "seatedNow": 4,
-      "seatedCount": 8,
-      "queuedCount": 2,
-      "tables": [
-        {
-          "code": "T1",
-          "capacity": 4,
-          "seatedCount": 4,
-          "status": "occupied"
-        }
-      ]
-    }
-  ]
-}
-```
-
-`outcome` is `queue_empty` when there are no active queue entries,
-`no_capacity` when the queue exists but no table is free, and `processed` when at
-least one party receives tables. The endpoint has no request body and returns
-`200 OK` for all three normal outcomes. `remainingQueuedParties` describes the
-transaction snapshot; a customer racing with the staff call may join immediately
-after that snapshot and require another processing call.
-
-### Release a table
-
-```bash
-curl -X PATCH http://localhost:3000/api/v1/owner/tables/T1/release
-```
-
-This frees the table, records the assignment release time, and updates the party's
-seated and departed counts. Releasing an unknown table returns `404 Not Found`;
-releasing an already-free table returns `409 Conflict`.
-
-## Allocation rules
-
-Tables are exclusive to one party even when some chairs are unused. A party may
-use multiple tables.
-
+Tables are exclusive to one party, although a party may use multiple tables.
 The selector applies these priorities in order:
 
 1. Seat the full party when combined free capacity permits it.
 2. Use the fewest tables.
-3. Among selections using the same number of tables, minimize unused chairs.
-4. Use the lowest table numbers as a deterministic final tie-break.
+3. For the same table count, minimize unused chairs.
+4. Use the lowest table numbers as a deterministic tie-break.
 
-The implementation uses dynamic programming over attainable capacity and table
-count. The challenge specifies uniform table capacities, where the state remains
-small, but the selector also remains correct for differing capacities.
+The selector uses dynamic programming over attainable capacity and table count.
+It supports the challenge's uniform table sizes and remains correct if table
+capacities differ.
 
-Partial seating is enabled. When total free capacity is insufficient, all
-available tables are assigned and the remainder receives one queue number.
+Partial seating is enabled. When free capacity cannot hold the entire party, all
+available tables are assigned and the remainder joins the persisted queue. Queue
+numbers start at `100`, increase monotonically, and remain stable for audit
+history. Active queue positions are calculated at read time.
 
-Strict FIFO applies once an active queue exists. A newly arriving customer joins
-the queue without claiming a free table, even when capacity is currently
-available. This prevents bypassing older parties but can intentionally leave
-tables idle until staff calls the queue-processing endpoint.
+Strict FIFO prevents a new arrival from bypassing an existing queue. Queue
+processing fully seats the oldest party when possible and continues while tables
+remain. If the oldest party can only be partially seated, it updates that party
+and stops without serving a newer party first.
 
-## Queue and release policy
+Table release and queue cancellation do **not** automatically process the queue.
+Staff must call `POST /owner/queue/process`. This keeps release behavior explicit
+and avoids hiding allocation work inside another command.
 
-Releasing a table does **not** automatically process the queue. It makes the table
-available for the separate `POST /api/v1/owner/queue/process` staff action and is
-reported as `queueReprocessed: false` by the release endpoint.
+Headcount must be a positive integer no greater than the restaurant's physical
+capacity (`tableCount × chairsPerTable`). Invalid input returns `400`; missing
+resources return `404`; state conflicts and unsafe reconfiguration return `409`.
 
-Queue cancellation also does not process the next entry. Party counts preserve
-the following invariant across allocation, cancellation, processing, and release:
+Party counts preserve this invariant throughout allocation, processing,
+cancellation, and release:
 
 ```text
 originalHeadcount = seatedCount + queuedCount + departedCount + cancelledCount
 ```
 
-For a party using multiple tables, releasing one table records the guests at that
-table as departed. A fully served party becomes `completed` after its final table
-is released. A party with unseated guests remains in the queue.
-
-Queue processing reads active parties in ascending queue-number order. It fully
-seats the oldest party when possible and then continues to the next entry while
-free tables remain. If the oldest party can only be seated partially, it updates
-that party and stops; no newer party is bypassed. Each processing attempt appends
-assignments to the existing party while preserving its queue number and previous,
-including released, assignment history.
-
 ## Concurrency approach
 
-Allocation runs inside a MongoDB transaction:
+Allocation, queue processing, cancellation, and table release use MongoDB
+transactions. Table claims are conditional on the table still being free, and
+queue numbers come from one atomic counter document. If a transaction loses a
+contention race, the operation reloads current state and retries up to three
+times.
 
-1. Read the configuration and check for an active queue.
-2. If a queue exists, persist the new party at its end without claiming a table.
-3. Otherwise read free tables and compute the best table selection.
-4. Conditionally update every selected table only when it is still `free` and has
-   no party.
-5. Atomically increment the queue counter when necessary.
-6. Persist the party and its table assignments.
-
-Any failure aborts the entire transaction. If a conditional table claim loses a
-race, allocation retries from fresh database state up to three times. MongoDB's
-transaction conflict handling plus the conditional filters prevent two successful
-responses from assigning the same table.
-
-Queue numbers use one atomic counter document and start at `100`.
-
-Queue processing uses the same transaction, conditional table claims, and
-three-attempt contention retry strategy. It also conditionally updates the oldest
-party using its observed queue number, queued count, and status. Consequently,
-simultaneous processors cannot claim the same table or subtract the same queued
-guests twice. A normal allocation racing with processing either observes the
-active queue and joins it or observes the post-processing table state; it cannot
-take a table from an older active entry.
-
-Queue cancellation runs in a transaction and conditionally matches the party's
-observed queue number, queued/seated/departed counts, and status. Cancellation and
-queue processing therefore cannot both consume the same queued guests. The losing
-operation retries from current state and either completes normally or reports that
-the party no longer has active queued guests.
+Queue processing also conditionally matches the observed party state before
+changing its counts. These checks prevent concurrent requests from assigning the
+same table, consuming the same queued guests twice, or allowing a newer party to
+bypass an older one.
 
 ## MongoDB model
 
 - `restaurantconfigs`: singleton operator configuration.
 - `tables`: capacity, status, occupied seats, and current party reference.
-- `parties`: original/seated/queued/departed/cancelled counts plus embedded
-  assignment history.
+- `parties`: party counts plus embedded assignment and release history.
 - `counters`: atomic queue-number sequence.
 
-Assignment history is embedded because it belongs to one party and is read and
-updated with that party. Current table occupancy remains a separate collection so
-it can be queried and conditionally claimed efficiently.
+Assignment history is embedded because it belongs to one party. Current table
+occupancy remains separate so tables can be queried and claimed atomically.
 
-## Tests
+## Local development and tests
+
+For hot reload, install Node.js 22+ and npm. MongoDB continues to run in Docker.
+If the full Docker stack is already running, stop its API container first with
+`docker compose stop api` so the local process can use port `3000`.
+
+Set up and start the local API with:
+
+```bash
+npm ci
+cp .env.example .env
+docker compose up -d mongodb
+npm run start:dev
+```
+
+Run the quality checks and test suites with:
 
 ```bash
 npm run typecheck
@@ -278,28 +160,24 @@ npm test
 npm run test:e2e
 ```
 
-The e2e suite uses a real MongoDB replica set and defaults to the isolated
-`blockasset_e2e` database. `MONGODB_TEST_URI` may override it, but as a safety
-measure the selected database name must end in `_e2e`. The suite clears its
-collections between tests and drops only that test database when finished.
+The e2e suite uses a real replica set and an isolated database whose name must
+end in `_e2e`. It covers persistence, validation, exact and partial allocation,
+FIFO behavior, release and cancellation, count invariants, and competing
+allocation and queue-processing requests.
 
-The tests cover allocation objective ordering, exact and partial fits, validation,
-queue numbering, table release, FIFO queue processing, repeated partial
-processing, assignment-history preservation, bypass prevention, persistence,
-queue cancellation, count invariants, simultaneous allocations, simultaneous
-queue processors competing for one table, and cancellation racing with queue
-processing.
+## Operations and scope
 
-## Status codes
+```bash
+# Follow API logs
+docker compose logs -f api
 
-- `200 OK`: reads, configuration, table release, queue processing, and queue
-  cancellation.
-- `201 Created`: a party allocation was persisted.
-- `400 Bad Request`: malformed input or physically impossible headcount.
-- `404 Not Found`: requested table does not exist.
-- `409 Conflict`: unsafe reconfiguration, already-free table, missing restaurant
-  configuration, no active queued guests to cancel, or repeated
-  allocation/queue-processing/cancellation contention.
+# Stop containers but preserve MongoDB data
+docker compose down
 
-Authentication is intentionally omitted because it is outside the challenge
-scope.
+# Stop containers and permanently delete local MongoDB data
+docker compose down -v
+```
+
+Authentication and a frontend are intentionally omitted because they are outside
+the challenge scope. The included MongoDB replica set is intended for local
+development and evaluation, not production deployment.
